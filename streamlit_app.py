@@ -354,6 +354,37 @@ def create_zip_file(save_dir, selected_images):
     return zip_buffer
 
 
+def excel_to_csv(excel_data):
+    """Excel 데이터를 CSV로 변환 (모든 시트를 하나의 CSV로)"""
+    try:
+        # Excel 파일 읽기
+        excel_file = BytesIO(excel_data)
+        excel_reader = pd.ExcelFile(excel_file)
+        
+        csv_buffer = BytesIO()
+        
+        # 모든 시트를 하나의 CSV로 합치기
+        all_data = []
+        for sheet_name in excel_reader.sheet_names:
+            df = pd.read_excel(excel_reader, sheet_name=sheet_name, header=None)
+            
+            # 시트 이름을 구분자로 추가
+            all_data.append([f"=== {sheet_name} ==="])
+            all_data.extend(df.values.tolist())
+            all_data.append([])  # 빈 줄 추가
+        
+        # CSV로 변환
+        csv_df = pd.DataFrame(all_data)
+        csv_string = csv_df.to_csv(index=False, header=False, encoding='utf-8-sig')
+        csv_buffer.write(csv_string.encode('utf-8-sig'))
+        csv_buffer.seek(0)
+        
+        return csv_buffer
+    except Exception as e:
+        print(f"CSV 변환 오류: {e}")
+        return None
+
+
 # ======================== Streamlit UI ========================
 
 def main():
@@ -622,18 +653,23 @@ def main():
                         # 이미지 표시
                         st.image(jpg_path, caption=Path(jpg_path).name, use_container_width=True)
                         
-                        # 체크박스
+                        # 체크박스 - 현재 선택 상태 확인
                         is_selected = jpg_path in st.session_state.selected_images
-                        if st.checkbox(
+                        
+                        # 체크박스 상태 변경 처리
+                        checkbox_value = st.checkbox(
                             f"선택", 
                             value=is_selected, 
                             key=f"checkbox_{idx}_{Path(jpg_path).name}"
-                        ):
-                            if jpg_path not in st.session_state.selected_images:
-                                st.session_state.selected_images.append(jpg_path)
-                        else:
-                            if jpg_path in st.session_state.selected_images:
-                                st.session_state.selected_images.remove(jpg_path)
+                        )
+                        
+                        # 체크박스 값이 변경되었을 때만 selected_images 업데이트
+                        if checkbox_value and not is_selected:
+                            # 체크박스가 체크되었는데 리스트에 없으면 추가
+                            st.session_state.selected_images.append(jpg_path)
+                        elif not checkbox_value and is_selected:
+                            # 체크박스가 해제되었는데 리스트에 있으면 제거
+                            st.session_state.selected_images.remove(jpg_path)
                 
                 st.divider()
                 
@@ -718,56 +754,76 @@ def main():
             st.divider()
             st.subheader("📥 결과 다운로드")
             
-            # 다운로드 버튼 (3개 버튼 배치)
+            # 다운로드 버튼 배치
             is_cloud = os.path.exists("/mount/src")  # Streamlit Cloud 감지
             
-            col1, col2, col3 = st.columns(3)
+            # 로컬 환경: 4개 버튼 (Excel, CSV, ZIP, 폴더 열기)
+            # 클라우드 환경: 3개 버튼 (Excel, CSV, ZIP)
+            if not is_cloud:
+                col1, col2, col3, col4 = st.columns(4)
+            else:
+                col1, col2, col3 = st.columns(3)
+                col4 = None
             
             with col1:
                 st.download_button(
-                    label="📥 Excel 다운로드",
+                    label="📥 Excel",
                     data=st.session_state.excel_data,
                     file_name="extracted_tables.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     type="primary",
-                    use_container_width=True
+                    use_container_width=True,
+                    help="Excel 파일 (.xlsx)"
                 )
             
             with col2:
+                # CSV 다운로드 (Google Sheets 호환)
+                try:
+                    csv_data = excel_to_csv(st.session_state.excel_data)
+                    if csv_data:
+                        st.download_button(
+                            label="📄 CSV",
+                            data=csv_data.getvalue(),
+                            file_name="extracted_tables.csv",
+                            mime="text/csv",
+                            type="secondary",
+                            use_container_width=True,
+                            help="CSV 파일 (Google Sheets 호환)"
+                        )
+                except Exception as e:
+                    st.error(f"CSV 생성 실패: {e}")
+            
+            with col3:
                 # ZIP 파일 생성 및 다운로드
                 if st.session_state.save_dir and st.session_state.selected_images:
                     try:
                         zip_data = create_zip_file(st.session_state.save_dir, st.session_state.selected_images)
                         st.download_button(
-                            label="📦 전체 ZIP 다운로드",
+                            label="📦 ZIP",
                             data=zip_data,
                             file_name="table_extraction_results.zip",
                             mime="application/zip",
                             type="secondary",
                             use_container_width=True,
-                            help="Excel 파일 + 추출된 이미지들을 모두 포함"
+                            help="Excel + 이미지 전체"
                         )
                     except Exception as e:
                         st.error(f"ZIP 생성 실패: {e}")
             
-            with col3:
+            if col4:
                 # 로컬 환경에만 폴더 열기 버튼 표시
-                if not is_cloud:
-                    if st.session_state.save_dir and os.path.exists(st.session_state.save_dir):
-                        if st.button("📂 폴더 열기", type="secondary", use_container_width=True):
-                            try:
-                                if platform.system() == "Windows":
-                                    os.startfile(st.session_state.save_dir)
-                                elif platform.system() == "Darwin":  # macOS
-                                    subprocess.Popen(["open", st.session_state.save_dir])
-                                else:  # Linux
-                                    subprocess.Popen(["xdg-open", st.session_state.save_dir])
-                                st.success(f"✅ 폴더를 열었습니다!")
-                            except Exception as e:
-                                st.error(f"❌ 폴더를 열 수 없습니다: {e}")
-                else:
-                    # 클라우드 환경에서는 빈 컬럼으로 유지
-                    st.write("")
+                if st.session_state.save_dir and os.path.exists(st.session_state.save_dir):
+                    if st.button("📂 폴더", type="secondary", use_container_width=True, help="저장 폴더 열기"):
+                        try:
+                            if platform.system() == "Windows":
+                                os.startfile(st.session_state.save_dir)
+                            elif platform.system() == "Darwin":  # macOS
+                                subprocess.Popen(["open", st.session_state.save_dir])
+                            else:  # Linux
+                                subprocess.Popen(["xdg-open", st.session_state.save_dir])
+                            st.success(f"✅ 폴더를 열었습니다!")
+                        except Exception as e:
+                            st.error(f"❌ 폴더를 열 수 없습니다: {e}")
             
             # 저장 위치 정보
             if st.session_state.save_dir:
