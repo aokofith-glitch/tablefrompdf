@@ -25,6 +25,7 @@ import tempfile
 import shutil
 import platform
 import subprocess
+import zipfile
 from io import BytesIO
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -152,7 +153,7 @@ def analyze_image_for_table(client, img_path):
 
 def detect_table_pages(client, pdf_path, poppler_path, status_placeholder):
     """PDF에서 테이블이 있는 페이지 탐지 (병렬처리)"""
-    kwargs = {"dpi": 150}
+    kwargs = {"dpi": 120}
     if poppler_path:
         kwargs["poppler_path"] = poppler_path
     
@@ -199,7 +200,7 @@ def save_table_pages_as_jpg(pdf_path, table_pages, output_dir, poppler_path):
     """테이블 페이지를 JPG로 저장"""
     os.makedirs(output_dir, exist_ok=True)
     
-    kwargs = {"dpi": 150}
+    kwargs = {"dpi": 300}
     if poppler_path:
         kwargs["poppler_path"] = poppler_path
     
@@ -331,6 +332,26 @@ def process_jpgs_to_excel(client, jpg_folder, status_placeholder):
     output.seek(0)
     
     return output
+
+
+def create_zip_file(save_dir, selected_images):
+    """저장된 파일들을 ZIP으로 압축"""
+    zip_buffer = BytesIO()
+    
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        # Excel 파일 추가
+        excel_path = os.path.join(save_dir, "extracted_tables.xlsx")
+        if os.path.exists(excel_path):
+            zip_file.write(excel_path, "extracted_tables.xlsx")
+        
+        # 선택된 JPG 이미지들 추가
+        for img_path in selected_images:
+            if os.path.exists(img_path):
+                filename = Path(img_path).name
+                zip_file.write(img_path, f"images/{filename}")
+    
+    zip_buffer.seek(0)
+    return zip_buffer
 
 
 # ======================== Streamlit UI ========================
@@ -697,36 +718,43 @@ def main():
             st.divider()
             st.subheader("📥 결과 다운로드")
             
-            # 다운로드 버튼 (클라우드 환경 고려)
+            # 다운로드 버튼 (3개 버튼 배치)
             is_cloud = os.path.exists("/mount/src")  # Streamlit Cloud 감지
             
-            if is_cloud:
-                # 클라우드 환경: 다운로드 버튼만 표시
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
                 st.download_button(
-                    label="📥 Download Excel File",
+                    label="📥 Excel 다운로드",
                     data=st.session_state.excel_data,
                     file_name="extracted_tables.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     type="primary",
                     use_container_width=True
                 )
-            else:
-                # 로컬 환경: 다운로드 + 폴더 열기 버튼
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.download_button(
-                        label="📥 Download Excel File",
-                        data=st.session_state.excel_data,
-                        file_name="extracted_tables.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        type="primary",
-                        use_container_width=True
-                    )
-                
-                with col2:
+            
+            with col2:
+                # ZIP 파일 생성 및 다운로드
+                if st.session_state.save_dir and st.session_state.selected_images:
+                    try:
+                        zip_data = create_zip_file(st.session_state.save_dir, st.session_state.selected_images)
+                        st.download_button(
+                            label="📦 전체 ZIP 다운로드",
+                            data=zip_data,
+                            file_name="table_extraction_results.zip",
+                            mime="application/zip",
+                            type="secondary",
+                            use_container_width=True,
+                            help="Excel 파일 + 추출된 이미지들을 모두 포함"
+                        )
+                    except Exception as e:
+                        st.error(f"ZIP 생성 실패: {e}")
+            
+            with col3:
+                # 로컬 환경에만 폴더 열기 버튼 표시
+                if not is_cloud:
                     if st.session_state.save_dir and os.path.exists(st.session_state.save_dir):
-                        if st.button("📂 Open Folder", type="secondary", use_container_width=True):
+                        if st.button("📂 폴더 열기", type="secondary", use_container_width=True):
                             try:
                                 if platform.system() == "Windows":
                                     os.startfile(st.session_state.save_dir)
@@ -737,6 +765,9 @@ def main():
                                 st.success(f"✅ 폴더를 열었습니다!")
                             except Exception as e:
                                 st.error(f"❌ 폴더를 열 수 없습니다: {e}")
+                else:
+                    # 클라우드 환경에서는 빈 컬럼으로 유지
+                    st.write("")
             
             # 저장 위치 정보
             if st.session_state.save_dir:
