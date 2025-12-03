@@ -697,10 +697,11 @@ def main():
             st.divider()
             st.subheader("📥 결과 다운로드")
             
-            # 다운로드 버튼과 폴더 열기 버튼을 나란히 배치
-            col1, col2 = st.columns(2)
+            # 다운로드 버튼 (클라우드 환경 고려)
+            is_cloud = os.path.exists("/mount/src")  # Streamlit Cloud 감지
             
-            with col1:
+            if is_cloud:
+                # 클라우드 환경: 다운로드 버튼만 표시
                 st.download_button(
                     label="📥 Download Excel File",
                     data=st.session_state.excel_data,
@@ -709,18 +710,33 @@ def main():
                     type="primary",
                     use_container_width=True
                 )
-            
-            with col2:
-                if st.session_state.save_dir and os.path.exists(st.session_state.save_dir):
-                    if st.button("📂 Open Folder", type="secondary", use_container_width=True):
-                        import subprocess
-                        if platform.system() == "Windows":
-                            os.startfile(st.session_state.save_dir)
-                        elif platform.system() == "Darwin":  # macOS
-                            subprocess.Popen(["open", st.session_state.save_dir])
-                        else:  # Linux
-                            subprocess.Popen(["xdg-open", st.session_state.save_dir])
-                        st.success(f"✅ 폴더를 열었습니다!")
+            else:
+                # 로컬 환경: 다운로드 + 폴더 열기 버튼
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.download_button(
+                        label="📥 Download Excel File",
+                        data=st.session_state.excel_data,
+                        file_name="extracted_tables.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        type="primary",
+                        use_container_width=True
+                    )
+                
+                with col2:
+                    if st.session_state.save_dir and os.path.exists(st.session_state.save_dir):
+                        if st.button("📂 Open Folder", type="secondary", use_container_width=True):
+                            try:
+                                if platform.system() == "Windows":
+                                    os.startfile(st.session_state.save_dir)
+                                elif platform.system() == "Darwin":  # macOS
+                                    subprocess.Popen(["open", st.session_state.save_dir])
+                                else:  # Linux
+                                    subprocess.Popen(["xdg-open", st.session_state.save_dir])
+                                st.success(f"✅ 폴더를 열었습니다!")
+                            except Exception as e:
+                                st.error(f"❌ 폴더를 열 수 없습니다: {e}")
             
             # 저장 위치 정보
             if st.session_state.save_dir:
