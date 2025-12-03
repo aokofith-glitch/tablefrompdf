@@ -2,13 +2,18 @@
 PDF Table Extraction Web App
 PDF → 페이지 분할 → 이미지 → GPT 테이블 추출 → Excel 저장
 
+[주요 기능]
+1. 2단계 처리 프로세스:
+   - 1단계: GPT를 사용하여 테이블이 있는 페이지 자동 탐지
+   - 2단계: 사용자가 원하는 페이지만 선택하여 테이블 추출
+2. 선택적 테이블 추출: 체크박스로 원하는 페이지만 선택 가능
+
 [성능 개선 사항]
 1. 병렬처리: ThreadPoolExecutor를 사용하여 GPT API 호출 병렬화 (최대 5개 동시 처리)
    - detect_table_pages(): 테이블 존재 여부 확인 병렬 처리
    - process_jpgs_to_excel(): 테이블 추출 병렬 처리
-2. DPI 최적화: 150/200 → 120으로 낮춰 처리 속도 향상
-3. 세션 상태 최소화: 불필요한 세션 변수 제거 (jpg_files, table_pages_info)
-   - 필요시 파일 시스템에서 직접 읽어 메모리 오버헤드 감소
+2. DPI 최적화: DPI 150으로 설정하여 속도와 품질 균형
+3. 세션 상태 최소화: 필수 항목만 세션에 저장하여 메모리 오버헤드 감소
 """
 
 import streamlit as st
@@ -344,6 +349,10 @@ def main():
         st.session_state.excel_data = None
     if "save_dir" not in st.session_state:
         st.session_state.save_dir = None
+    if "detection_complete" not in st.session_state:
+        st.session_state.detection_complete = False
+    if "selected_images" not in st.session_state:
+        st.session_state.selected_images = []
     
     # 타이틀
     st.title("📊 PDF Table Extractor")
@@ -434,6 +443,8 @@ def main():
         st.session_state.processed = False
         st.session_state.excel_data = None
         st.session_state.save_dir = None
+        st.session_state.detection_complete = False
+        st.session_state.selected_images = []
         
         # Poppler 경로 확인
         # 수동 입력된 경로가 있으면 우선 사용
@@ -464,6 +475,9 @@ def main():
                     f"올바른 bin 폴더 경로를 입력했는지 확인하세요."
                 )
                 return
+        
+        # API 키 세션 상태에 저장
+        st.session_state.api_key = api_key
         
         # OpenAI 클라이언트 초기화
         try:
@@ -530,45 +544,32 @@ def main():
                         saved_jpgs = save_table_pages_as_jpg(chunk_path, table_pages, jpg_output_dir, poppler_path)
                         all_jpg_files.extend(saved_jpgs)
                 
-                # Step 4: 테이블 추출 및 Excel 저장
-                status_box.info("📊 Extracting tables and creating Excel...")
-                progress_bar.progress(0.70)
-                
+                # 테이블 탐지 완료
                 if all_jpg_files:
-                    excel_data = process_jpgs_to_excel(client, jpg_output_dir, status_box)
-                    
-                    if excel_data:
-                        st.session_state.excel_data = excel_data.getvalue()
-                        
-                        # Excel 파일도 save 폴더에 저장
-                        excel_path = os.path.join(save_dir, "extracted_tables.xlsx")
-                        with open(excel_path, "wb") as f:
-                            f.write(st.session_state.excel_data)
-                        
-                        progress_bar.progress(1.0)
-                        status_box.success(f"✅ Processing completed! Files saved to: `{save_dir}`")
-                        st.session_state.processed = True
-                    else:
-                        progress_bar.progress(1.0)
-                        status_box.warning("⚠️ No tables were extracted from the images.")
-                        st.session_state.processed = True
+                    progress_bar.progress(0.70)
+                    status_box.success(f"✅ Table detection completed! Found {len(all_jpg_files)} pages with tables.")
+                    st.session_state.detection_complete = True
+                    st.session_state.selected_images = all_jpg_files  # 기본적으로 모두 선택
                 else:
                     progress_bar.progress(1.0)
                     status_box.warning("⚠️ No table pages were detected in the PDF.")
-                    st.session_state.processed = True
+                    st.session_state.detection_complete = True
             
             except Exception as e:
                 st.error(f"❌ 처리 중 오류 발생: {str(e)}")
                 import traceback
                 st.code(traceback.format_exc())
     
-    # ======================== 결과 표시 ========================
+    # ======================== 페이지 선택 UI ========================
     
-    if st.session_state.processed and st.session_state.save_dir:
+    if st.session_state.detection_complete and st.session_state.save_dir and not st.session_state.processed:
         st.divider()
         save_dir = st.session_state.save_dir
         
-        # JPG 썸네일 표시 (파일 시스템에서 직접 읽기)
+        st.subheader("📋 테이블 추출할 페이지 선택")
+        st.markdown("추출하고 싶은 페이지를 선택하세요. 선택된 페이지만 테이블 추출 작업이 진행됩니다.")
+        
+        # JPG 파일 목록 가져오기
         jpg_output_dir = os.path.join(save_dir, "PDF_single_page_jpg")
         if os.path.exists(jpg_output_dir):
             jpg_files = sorted([
@@ -578,14 +579,118 @@ def main():
             ])
             
             if jpg_files:
-                st.subheader("🖼️ 생성된 테이블 이미지")
+                # 전체 선택/해제 버튼
+                col1, col2, col3 = st.columns([1, 1, 4])
+                with col1:
+                    if st.button("✅ 전체 선택", use_container_width=True):
+                        st.session_state.selected_images = jpg_files.copy()
+                        st.rerun()
+                with col2:
+                    if st.button("❌ 전체 해제", use_container_width=True):
+                        st.session_state.selected_images = []
+                        st.rerun()
                 
-                # 3열 그리드로 표시
+                st.markdown(f"**선택된 페이지: {len(st.session_state.selected_images)}/{len(jpg_files)}**")
+                st.divider()
+                
+                # 이미지 그리드 표시 (체크박스 포함)
                 cols = st.columns(3)
                 
                 for idx, jpg_path in enumerate(jpg_files):
                     with cols[idx % 3]:
+                        # 이미지 표시
                         st.image(jpg_path, caption=Path(jpg_path).name, use_container_width=True)
+                        
+                        # 체크박스
+                        is_selected = jpg_path in st.session_state.selected_images
+                        if st.checkbox(
+                            f"선택", 
+                            value=is_selected, 
+                            key=f"checkbox_{idx}_{Path(jpg_path).name}"
+                        ):
+                            if jpg_path not in st.session_state.selected_images:
+                                st.session_state.selected_images.append(jpg_path)
+                        else:
+                            if jpg_path in st.session_state.selected_images:
+                                st.session_state.selected_images.remove(jpg_path)
+                
+                st.divider()
+                
+                # 테이블 추출 시작 버튼
+                if st.session_state.selected_images:
+                    if st.button(
+                        f"🚀 선택한 {len(st.session_state.selected_images)}개 페이지에서 테이블 추출", 
+                        type="primary", 
+                        use_container_width=True
+                    ):
+                        # Progress bar와 status box
+                        progress_bar = st.progress(0)
+                        status_box = st.empty()
+                        
+                        try:
+                            # OpenAI 클라이언트 재사용
+                            api_key = st.session_state.get("api_key")
+                            if not api_key:
+                                st.error("❌ API 키가 없습니다. 페이지를 새로고침하고 다시 시도하세요.")
+                                st.stop()
+                            
+                            client = OpenAI(api_key=api_key)
+                            
+                            # 선택된 이미지만 처리
+                            status_box.info("📊 Extracting tables from selected pages...")
+                            progress_bar.progress(0.1)
+                            
+                            # 선택된 이미지를 임시 폴더에 복사
+                            temp_selected_dir = os.path.join(save_dir, "selected_pages")
+                            os.makedirs(temp_selected_dir, exist_ok=True)
+                            
+                            for img_path in st.session_state.selected_images:
+                                shutil.copy(img_path, temp_selected_dir)
+                            
+                            progress_bar.progress(0.2)
+                            
+                            # 선택된 페이지에서 테이블 추출
+                            excel_data = process_jpgs_to_excel(client, temp_selected_dir, status_box)
+                            
+                            if excel_data:
+                                st.session_state.excel_data = excel_data.getvalue()
+                                
+                                # Excel 파일 저장
+                                excel_path = os.path.join(save_dir, "extracted_tables.xlsx")
+                                with open(excel_path, "wb") as f:
+                                    f.write(st.session_state.excel_data)
+                                
+                                progress_bar.progress(1.0)
+                                status_box.success(f"✅ Table extraction completed! {len(st.session_state.selected_images)} pages processed.")
+                                st.session_state.processed = True
+                                st.rerun()
+                            else:
+                                progress_bar.progress(1.0)
+                                status_box.warning("⚠️ No tables were extracted from the selected images.")
+                        
+                        except Exception as e:
+                            st.error(f"❌ 테이블 추출 중 오류 발생: {str(e)}")
+                            import traceback
+                            st.code(traceback.format_exc())
+                else:
+                    st.warning("⚠️ 최소 1개 이상의 페이지를 선택해주세요.")
+    
+    # ======================== 결과 표시 ========================
+    
+    if st.session_state.processed and st.session_state.save_dir:
+        st.divider()
+        save_dir = st.session_state.save_dir
+        
+        # 선택된 이미지 표시
+        st.subheader("🖼️ 추출된 페이지")
+        st.markdown(f"**총 {len(st.session_state.selected_images)}개 페이지**")
+        
+        # 3열 그리드로 표시
+        cols = st.columns(3)
+        
+        for idx, jpg_path in enumerate(st.session_state.selected_images):
+            with cols[idx % 3]:
+                st.image(jpg_path, caption=Path(jpg_path).name, use_container_width=True)
         
         # Excel 다운로드 버튼 (메인 페이지)
         if st.session_state.excel_data:
